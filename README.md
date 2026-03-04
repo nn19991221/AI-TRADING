@@ -72,3 +72,24 @@ The app initializes tables, executes one immediate cycle, and then runs every 30
 - This MVP is configured for **paper trading** only.
 - To switch to live trading later, replace/extend the broker adapter in `broker/alpaca_broker.py`.
 - Logs are written to `logs/trading.log` and key entities are persisted in PostgreSQL.
+
+## Backtesting Engine
+
+A historical replay engine is available under `backtest/` and mirrors the live trading lifecycle:
+
+`bar close -> strategy signal -> risk checks -> order queued -> next bar open fill -> portfolio mark-to-market`
+
+### Highlights
+- Reuses the existing `MovingAverageCrossoverStrategy.generate_signal(...)` interface unchanged.
+- Applies existing `RiskManager` checks and sizing rules.
+- Simulates market-order execution at the **next bar open**.
+- Tracks cash, positions, trade log, and per-bar equity.
+- Computes required metrics: equity curve, max drawdown, and Sharpe ratio.
+
+### Run
+
+```bash
+python -m backtest.run_backtest
+```
+
+The runner loads historical bars from `market_bars` and prints JSON results including `equity_curve`, `max_drawdown`, `sharpe_ratio`, and `trade_log`.
