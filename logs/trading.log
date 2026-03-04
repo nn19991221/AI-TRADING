@@ -1,0 +1,9 @@
+2026-03-03 20:52:27,173 INFO trading_scheduler Starting trading cycle
+2026-03-03 21:17:15,429 INFO trading_scheduler Starting trading cycle
+2026-03-03 21:17:17,381 INFO trading_scheduler Symbol=AAPL bars_inserted=29 signal=BUY order_status=OrderStatus.ACCEPTED
+2026-03-03 21:17:17,888 INFO trading_scheduler Symbol=MSFT bars_inserted=36 signal=BUY order_status=OrderStatus.ACCEPTED
+2026-03-03 21:17:18,099 INFO trading_scheduler Portfolio snapshot: {'cash': 100000.0, 'equity': 100000.0, 'daily_pnl': 0.0, 'positions': []}
+2026-03-03 21:17:18,108 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-03-03 21:17:18,108 INFO trading_scheduler Scheduler started. Running every 30 minutes.
+2026-03-03 21:17:18,111 INFO apscheduler.scheduler Added job "TradingJobScheduler.run_cycle" to job store "default"
+2026-03-03 21:17:18,111 INFO apscheduler.scheduler Scheduler started
