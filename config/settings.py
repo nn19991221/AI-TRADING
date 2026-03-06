@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     alpaca_secret_key: str = Field(default='', alias='ALPACA_SECRET_KEY')
     alpaca_base_url: str = Field(default='https://paper-api.alpaca.markets', alias='ALPACA_BASE_URL')
     data_feed: str = Field(default='iex', alias='ALPACA_DATA_FEED')
+    openai_api_key: str = Field(default='', alias='OPENAI_API_KEY')
+    openai_model: str = Field(default='gpt-4.1-mini', alias='OPENAI_MODEL')
+    llm_market_model: str = Field(default='gpt-4.1-mini', alias='LLM_MARKET_MODEL')
+    llm_decision_model: str = Field(default='gpt-4.1-mini', alias='LLM_DECISION_MODEL')
+    llm_scheduler_model: str = Field(default='gpt-4.1-mini', alias='LLM_SCHEDULER_MODEL')
+    llm_risk_model: str = Field(default='gpt-4.1-mini', alias='LLM_RISK_MODEL')
 
     symbols: str = Field(default='AAPL,MSFT', alias='TRADE_SYMBOLS')
     bar_timeframe: str = Field(default='30Min', alias='BAR_TIMEFRAME')
