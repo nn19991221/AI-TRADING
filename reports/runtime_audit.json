@@ -1,0 +1,18 @@
+{
+  "date": "2026-03-06",
+  "total_cycles": 5,
+  "strategy_agent_calls": 0,
+  "frequency_agent_calls": 5,
+  "cache_hit_rate": 0.8333333333333334,
+  "total_trades": 5,
+  "blocked_trades_by_risk_guard": 0,
+  "blocked_trades_by_circuit_breaker": 0,
+  "average_next_check_minutes": 6.4,
+  "fallback_usage_rate": 1.0,
+  "estimated_token_usage_per_day": 600,
+  "strategy_mode": "fallback_legacy",
+  "strategy_mode_breakdown": {
+    "llm_cycles": 0,
+    "fallback_legacy_cycles": 5
+  }
+}

@@ -6,6 +6,7 @@ import logging
 from typing import Any, Protocol
 
 from agents.data_agent import build_default_data_agent
+from agents.strategy_agent.service import StrategyDecision, build_default_strategy_agent
 from broker.alpaca_broker import AlpacaBroker
 from config.settings import Settings, get_settings
 from core.contracts.market_snapshot import LLMMarketSnapshot
@@ -13,10 +14,14 @@ from execution.order_executor import OrderExecutor
 from logs.decision_logger import log_decision
 from logs.trade_logger import log_trade
 from metrics.performance_metrics import update_daily_metrics
+from metrics.runtime_audit import update_runtime_audit
 from portfolio.portfolio_manager import PortfolioManager
+from risk.circuit_breaker import CircuitBreaker
+from risk.risk_guard import RiskGuard
 from risk.risk_manager import RiskManager
-from risk.system_guard import GuardDecision, SystemGuard
-from state.portfolio_store import save_portfolio_state
+from state.market_cache import MarketStateCache
+from state.portfolio_store import load_portfolio_state, save_portfolio_state
+from utils.market_summary import build_market_summary
 
 
 @dataclass
@@ -63,6 +68,14 @@ class LLMAgent(Protocol):
         ...
 
 
+class StrategyAgent(Protocol):
+    def analyze(self, snapshot: LLMMarketSnapshot) -> StrategyDecision:
+        ...
+
+    def analyze_batch(self, snapshots: dict[str, LLMMarketSnapshot]) -> dict[str, StrategyDecision]:
+        ...
+
+
 class MarketAnalysisAgent(Protocol):
     def analyze(self, snapshot: LLMMarketSnapshot) -> Any:
         ...
@@ -103,14 +116,20 @@ class FrequencyAgent(Protocol):
         ...
 
 
-class SystemGuardProtocol(Protocol):
-    def pre_trade_check(self, decision: TradingDecision, now: datetime | None = None) -> GuardDecision:
+class RiskGuardProtocol(Protocol):
+    def validate(
+        self,
+        decision: Any,
+        *,
+        portfolio_state: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> Any:
         ...
 
     def record_trade(self, now: datetime | None = None) -> None:
         ...
 
-    def update_portfolio(self, portfolio_state: dict[str, Any], now: datetime | None = None) -> None:
+    def update_after_cycle(self, portfolio_state: dict[str, Any], trades_executed: int, now: datetime | None = None) -> None:
         ...
 
 
@@ -251,15 +270,17 @@ def run_cycle(
     symbols: list[str],
     *,
     data_agent: DataSnapshotProvider | None = None,
+    strategy_agent: StrategyAgent | None = None,
     market_agent: MarketAnalysisAgent | None = None,
     decision_agent: DecisionAgent | None = None,
     risk_agent: RiskAgent | None = None,
+    risk_guard: RiskGuardProtocol | None = None,
     frequency_agent: FrequencyAgent | None = None,
     llm_agent: LLMAgent | None = None,  # Legacy compatibility
     risk_manager: DecisionRiskManager | None = None,  # Legacy compatibility
     executor: TradingDecisionExecutor | None = None,
     portfolio_updater: PortfolioUpdater | None = None,
-    system_guard: SystemGuardProtocol | None = None,
+    system_guard: RiskGuardProtocol | None = None,  # Legacy compatibility alias
     settings: Settings | None = None,
 ) -> TradingCycleReport:
     logger = logging.getLogger('trading_orchestrator')
@@ -269,23 +290,31 @@ def run_cycle(
     dependencies = _build_default_dependencies(
         settings=settings,
         data_agent=data_agent,
+        strategy_agent=strategy_agent,
         market_agent=market_agent,
         decision_agent=decision_agent,
         risk_agent=risk_agent,
+        risk_guard=risk_guard or system_guard,
         frequency_agent=frequency_agent,
         llm_agent=llm_agent,
         risk_manager=risk_manager,
         executor=executor,
         portfolio_updater=portfolio_updater,
-        system_guard=system_guard,
     )
 
     results: list[TradingSymbolResult] = []
     signal_rows: list[dict[str, Any]] = []
     executed_trades: list[dict[str, Any]] = []
+    blocked_by_risk_guard = 0
+    blocked_by_circuit_breaker = 0
 
+    snapshots: dict[str, LLMMarketSnapshot] = {}
+    summaries: dict[str, dict[str, Any]] = {}
     for symbol in symbols:
         snapshot = dependencies['data_agent'].build_snapshot(symbol)
+        snapshots[symbol] = snapshot
+        summary = build_market_summary(snapshot)
+        summaries[symbol] = summary
         log_decision(
             {
                 'timestamp': snapshot.as_of,
@@ -293,28 +322,61 @@ def run_cycle(
                 'agent': 'market',
                 'action': 'HOLD',
                 'confidence': 0.0,
-                'reason': 'market snapshot fetched',
+                'reason': f"summary={summary['trend']}/{summary['volatility']}/{summary['momentum']} volume_spike={summary['volume_spike']}",
                 'price': snapshot.latest_price,
                 'volatility': snapshot.indicators.get('volatility', 0.0),
             }
         )
 
-        market_analysis = dependencies['market_agent'].analyze(snapshot)
-        log_decision(
-            {
-                'timestamp': snapshot.as_of,
-                'symbol': symbol,
-                'agent': 'market',
-                'action': 'HOLD',
-                'confidence': 0.0,
-                'reason': str(_read_attr_or_key(market_analysis, 'summary', default='market analysis complete')),
-                'price': snapshot.latest_price,
-                'volatility': snapshot.indicators.get('volatility', 0.0),
-            }
-        )
+    strategy_outputs: dict[str, Any] = {}
+    pending_snapshots: dict[str, LLMMarketSnapshot] = {}
+    reused_symbols: set[str] = set()
+    strategy_mode = 'llm' if dependencies['strategy_agent'] is not None else 'fallback_legacy'
+    for symbol, snapshot in snapshots.items():
+        cached = dependencies['market_cache'].get_cached_decision(symbol, summaries[symbol]['volatility'])
+        if cached is not None:
+            strategy_outputs[symbol] = cached
+            reused_symbols.add(symbol.upper())
+        else:
+            pending_snapshots[symbol] = snapshot
 
-        decision_output = dependencies['decision_agent'].analyze(snapshot, market_analysis)
-        decision = _decision_from_output(symbol=symbol, output=decision_output)
+    strategy_agent_calls = 0
+    strategy_symbols_sent = 0
+
+    if pending_snapshots:
+        if dependencies['strategy_agent'] is not None:
+            strategy_agent_calls = 1
+            strategy_symbols_sent = len(pending_snapshots)
+            fresh = dependencies['strategy_agent'].analyze_batch(pending_snapshots)
+            for symbol, output in fresh.items():
+                strategy_outputs[symbol.upper()] = output
+        else:
+            for symbol, snapshot in pending_snapshots.items():
+                market_analysis = dependencies['market_agent'].analyze(snapshot)
+                strategy_outputs[symbol] = dependencies['decision_agent'].analyze(snapshot, market_analysis)
+
+    prior_portfolio_state = load_portfolio_state()
+    for symbol in symbols:
+        snapshot = snapshots[symbol]
+        summary = summaries[symbol]
+        raw_output = strategy_outputs.get(symbol) or strategy_outputs.get(symbol.upper()) or {}
+        decision = _decision_from_output(symbol=symbol, output=raw_output)
+        market_state = str(_read_attr_or_key(raw_output, 'market_state', default=summary['trend']))
+
+        if symbol.upper() not in reused_symbols:
+            dependencies['market_cache'].update(
+                symbol=symbol,
+                volatility=summary['volatility'],
+                decision_payload={
+                    'symbol': symbol,
+                    'market_state': market_state,
+                    'action': decision.normalized_action(),
+                    'confidence': float(decision.confidence or 0.0),
+                    'position_size': float(decision.meta.get('position_size', 0.0) or 0.0),
+                    'reason': decision.rationale or 'strategy decision',
+                },
+            )
+
         log_decision(
             {
                 'timestamp': snapshot.as_of,
@@ -322,21 +384,33 @@ def run_cycle(
                 'agent': 'decision',
                 'action': decision.normalized_action(),
                 'confidence': decision.confidence or 0.0,
-                'reason': decision.rationale,
+                'reason': f'market_state={market_state}; {decision.rationale}',
                 'price': snapshot.latest_price,
                 'volatility': snapshot.indicators.get('volatility', 0.0),
             }
         )
 
-        risk_output = dependencies['risk_agent'].assess(snapshot, decision)
-        approved, reason = _risk_result(risk_output)
-        adjusted_action = str(_read_attr_or_key(risk_output, 'adjusted_action', default=decision.normalized_action()))
-        decision.action = adjusted_action
-        guard_result = dependencies['system_guard'].pre_trade_check(decision, now=snapshot.as_of)
-        if not guard_result.allowed:
-            approved = False
-            reason = guard_result.reason
-            decision.action = 'HOLD'
+        if dependencies['risk_guard'] is not None:
+            risk_check = dependencies['risk_guard'].validate(
+                decision,
+                portfolio_state=prior_portfolio_state,
+                now=snapshot.as_of,
+            )
+            approved = bool(_read_attr_or_key(risk_check, 'approved', default=False))
+            reason = str(_read_attr_or_key(risk_check, 'reason', default='RISK_GUARD_REJECTED'))
+            decision.action = str(_read_attr_or_key(risk_check, 'action', default='HOLD'))
+        else:
+            risk_output = dependencies['risk_agent'].assess(snapshot, decision)
+            approved, reason = _risk_result(risk_output)
+            adjusted_action = str(_read_attr_or_key(risk_output, 'adjusted_action', default=decision.normalized_action()))
+            decision.action = adjusted_action
+
+        if not approved:
+            reason_upper = reason.upper()
+            if reason_upper.startswith('CIRCUIT_BREAKER'):
+                blocked_by_circuit_breaker += 1
+            elif dependencies['risk_guard'] is not None and reason_upper != 'HOLD_SIGNAL':
+                blocked_by_risk_guard += 1
 
         log_decision(
             {
@@ -354,7 +428,8 @@ def run_cycle(
         if approved:
             execution_status = dependencies['executor'].execute(decision, snapshot)
             if not str(execution_status).upper().startswith('SKIPPED'):
-                dependencies['system_guard'].record_trade(now=snapshot.as_of)
+                if dependencies['risk_guard'] is not None:
+                    dependencies['risk_guard'].record_trade(now=snapshot.as_of)
                 executed_trades.append(
                     {
                         'timestamp': snapshot.as_of,
@@ -397,7 +472,12 @@ def run_cycle(
         )
 
     portfolio_state = dependencies['portfolio_updater'].update()
-    dependencies['system_guard'].update_portfolio(portfolio_state, now=datetime.now(timezone.utc))
+    if dependencies['risk_guard'] is not None:
+        dependencies['risk_guard'].update_after_cycle(
+            portfolio_state=portfolio_state,
+            trades_executed=len(executed_trades),
+            now=datetime.now(timezone.utc),
+        )
     persisted_portfolio_state = _build_persisted_portfolio_state(portfolio_state)
     save_portfolio_state(persisted_portfolio_state)
 
@@ -419,7 +499,10 @@ def run_cycle(
     frequency_context = _build_frequency_context(signal_rows=signal_rows, portfolio_state=portfolio_state)
     next_check_minutes = 5
     frequency_reason = 'Fallback interval'
+    frequency_agent_calls = 0
+    frequency_fallback_used = False
     try:
+        frequency_agent_calls = 1
         freq_output = _recommend_frequency(
             frequency_agent=dependencies['frequency_agent'],
             results=[_serialize_result(item) for item in results],
@@ -439,6 +522,7 @@ def run_cycle(
     except Exception as exc:
         next_check_minutes = 5
         frequency_reason = f'Fallback 5m: {exc}'
+        frequency_fallback_used = True
 
     log_decision(
         {
@@ -455,6 +539,24 @@ def run_cycle(
     )
 
     finished_at = datetime.now(timezone.utc)
+    try:
+        update_runtime_audit(
+            cycle_time=finished_at,
+            total_symbols=len(symbols),
+            strategy_agent_calls=strategy_agent_calls,
+            strategy_symbols_sent=strategy_symbols_sent,
+            frequency_agent_calls=frequency_agent_calls,
+            cache_hits=len(reused_symbols),
+            trades_executed=len(executed_trades),
+            blocked_by_risk_guard=blocked_by_risk_guard,
+            blocked_by_circuit_breaker=blocked_by_circuit_breaker,
+            next_check_minutes=next_check_minutes,
+            fallback_used=frequency_fallback_used or strategy_mode != 'llm',
+            strategy_mode=strategy_mode,
+        )
+    except Exception:
+        logger.exception('Failed to update runtime audit report')
+
     return TradingCycleReport(
         started_at=started_at,
         finished_at=finished_at,
@@ -469,24 +571,46 @@ def _build_default_dependencies(
     *,
     settings: Settings,
     data_agent: DataSnapshotProvider | None,
+    strategy_agent: StrategyAgent | None,
     market_agent: MarketAnalysisAgent | None,
     decision_agent: DecisionAgent | None,
     risk_agent: RiskAgent | None,
+    risk_guard: RiskGuardProtocol | None,
     frequency_agent: FrequencyAgent | None,
     llm_agent: LLMAgent | None,
     risk_manager: DecisionRiskManager | None,
     executor: TradingDecisionExecutor | None,
     portfolio_updater: PortfolioUpdater | None,
-    system_guard: SystemGuardProtocol | None,
 ) -> dict[str, Any]:
+    legacy_requested = any(
+        [
+            market_agent is not None,
+            decision_agent is not None,
+            risk_agent is not None,
+            llm_agent is not None,
+            risk_manager is not None,
+        ]
+    )
+    if strategy_agent is None and not legacy_requested:
+        try:
+            strategy_agent = build_default_strategy_agent(model=settings.llm_strategy_model)
+        except Exception:
+            strategy_agent = None
+
     if llm_agent and not decision_agent:
         decision_agent = LegacyDecisionAgentAdapter(llm_agent)
     if risk_manager and not risk_agent:
         risk_agent = LegacyRiskAgentAdapter(risk_manager)
 
-    if not decision_agent:
+    if not decision_agent and not strategy_agent:
         decision_agent = LegacyDecisionAgentAdapter(HeuristicLLMAgent())
-    requires_broker = data_agent is None or executor is None or portfolio_updater is None or risk_agent is None
+
+    requires_broker = (
+        data_agent is None
+        or executor is None
+        or portfolio_updater is None
+        or (risk_agent is None and risk_guard is None and risk_manager is None)
+    )
 
     broker: AlpacaBroker | None = None
     base_risk_core: RiskManager | None = None
@@ -499,9 +623,10 @@ def _build_default_dependencies(
         )
         default_risk_manager = DefaultDecisionRiskManager(broker=broker, risk_manager=base_risk_core)
 
-    if not risk_agent:
-        if not default_risk_manager:
-            raise ValueError('risk_agent or risk_manager is required when broker defaults are unavailable')
+    if risk_guard is None and not legacy_requested:
+        risk_guard = RiskGuard(circuit_breaker=CircuitBreaker())
+
+    if risk_agent is None and default_risk_manager is not None:
         risk_agent = LegacyRiskAgentAdapter(default_risk_manager)
 
     if executor is None:
@@ -518,13 +643,15 @@ def _build_default_dependencies(
 
     return {
         'data_agent': data_agent or build_default_data_agent(settings),
+        'strategy_agent': strategy_agent,
         'market_agent': market_agent or HeuristicMarketAnalysisAgent(),
-        'decision_agent': decision_agent,
+        'decision_agent': decision_agent or LegacyDecisionAgentAdapter(HeuristicLLMAgent()),
         'risk_agent': risk_agent,
+        'risk_guard': risk_guard,
+        'market_cache': MarketStateCache(),
         'frequency_agent': frequency_agent or FixedFrequencyAgent(minutes=5),
         'executor': executor,
         'portfolio_updater': portfolio_updater,
-        'system_guard': system_guard or SystemGuard(),
     }
 
 
@@ -536,14 +663,24 @@ def _decision_from_output(symbol: str, output: Any) -> TradingDecision:
     action = str(_read_attr_or_key(output, 'action', default='HOLD')).upper()
     confidence = _to_float_or_none(_read_attr_or_key(output, 'confidence', default=None))
     position_size = _to_float_or_none(_read_attr_or_key(output, 'position_size', default=None))
-    reasoning = str(_read_attr_or_key(output, 'reasoning', default=''))
+    reasoning = str(
+        _read_attr_or_key(
+            output,
+            'reason',
+            default=_read_attr_or_key(output, 'reasoning', default=''),
+        )
+    )
+    market_state = str(_read_attr_or_key(output, 'market_state', default=''))
 
     return TradingDecision(
         symbol=symbol,
         action=action,
         confidence=confidence,
         rationale=reasoning,
-        meta={'position_size': position_size if position_size is not None else 0.0},
+        meta={
+            'position_size': position_size if position_size is not None else 0.0,
+            'market_state': market_state,
+        },
     )
 
 

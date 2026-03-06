@@ -40,9 +40,8 @@ def run_trading_loop(
             report = run_cycle(
                 symbols,
                 data_agent=components.data_agent,
-                market_agent=components.market_agent,
-                decision_agent=components.decision_agent,
-                risk_agent=components.risk_agent,
+                strategy_agent=components.strategy_agent,
+                risk_guard=components.risk_guard,
                 frequency_agent=components.frequency_agent,
                 executor=components.executor,
                 portfolio_updater=components.portfolio_updater,

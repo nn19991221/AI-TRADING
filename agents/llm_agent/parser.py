@@ -5,8 +5,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from orchestrator.trading_cycle import TradingDecision
-
 
 class DecisionPayload(BaseModel):
     action: Literal['BUY', 'SELL', 'HOLD']
@@ -20,7 +18,9 @@ def parse_decision_json(raw: str) -> DecisionPayload:
     return DecisionPayload.model_validate(payload_dict)
 
 
-def to_trading_decision(symbol: str, payload: DecisionPayload) -> TradingDecision:
+def to_trading_decision(symbol: str, payload: DecisionPayload):
+    from orchestrator.trading_cycle import TradingDecision
+
     return TradingDecision(
         symbol=symbol,
         action=payload.action,
@@ -52,4 +52,3 @@ def _extract_json_object(raw: str) -> dict:
     if not isinstance(decoded, dict):
         raise ValueError('LLM JSON payload must be an object')
     return decoded
-

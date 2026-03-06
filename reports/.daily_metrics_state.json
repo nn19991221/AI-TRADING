@@ -1,8 +1,8 @@
 {
   "date": "2026-03-06",
-  "total_trades": 5,
-  "wins": 4,
-  "losses": 1,
+  "total_trades": 20,
+  "wins": 16,
+  "losses": 4,
   "cumulative_pnl": -100000.0,
   "max_drawdown": 0.9900990099009901,
   "equity_peak": 101000.0,

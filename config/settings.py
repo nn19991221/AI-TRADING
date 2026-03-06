@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     llm_decision_model: str = Field(default='gpt-4.1-mini', alias='LLM_DECISION_MODEL')
     llm_scheduler_model: str = Field(default='gpt-4.1-mini', alias='LLM_SCHEDULER_MODEL')
     llm_risk_model: str = Field(default='gpt-4.1-mini', alias='LLM_RISK_MODEL')
+    llm_strategy_model: str = Field(default='gpt-4.1-mini', alias='LLM_STRATEGY_MODEL')
 
     symbols: str = Field(default='AAPL,MSFT', alias='TRADE_SYMBOLS')
     bar_timeframe: str = Field(default='30Min', alias='BAR_TIMEFRAME')

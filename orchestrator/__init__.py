@@ -6,7 +6,9 @@ from .trading_cycle import (
     LLMAgent,
     MarketAnalysisAgent,
     PortfolioUpdater,
+    RiskGuardProtocol,
     RiskAgent,
+    StrategyAgent,
     TradingCycleReport,
     TradingDecision,
     TradingDecisionExecutor,
@@ -16,9 +18,11 @@ from .trading_cycle import (
 
 __all__ = [
     'DataSnapshotProvider',
+    'StrategyAgent',
     'MarketAnalysisAgent',
     'DecisionAgent',
     'RiskAgent',
+    'RiskGuardProtocol',
     'FrequencyAgent',
     'DecisionRiskManager',
     'LLMAgent',

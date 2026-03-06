@@ -18,13 +18,32 @@ def build_messages(
     portfolio_state: dict[str, Any],
     context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
+    context = context or {}
+    volatility = context.get('avg_market_volatility')
+    if volatility is None:
+        vol_values = [float(item.get('volatility', 0.0)) for item in results]
+        volatility = (sum(vol_values) / len(vol_values)) if vol_values else 0.0
+
+    open_positions = context.get('open_positions')
+    if open_positions is None:
+        raw_positions = portfolio_state.get('positions', [])
+        open_positions = len(raw_positions) if isinstance(raw_positions, list) else 0
+
+    recent_trade_activity = context.get('recent_trade_activity')
+    if recent_trade_activity is None:
+        recent_trade_activity = sum(
+            1
+            for item in results
+            if str(item.get('execution_status', '')).upper() not in {'', 'SKIPPED_RISK_REJECTED', 'SKIPPED_HOLD'}
+        )
+
     payload = {
-        'results': results,
-        'portfolio_state': portfolio_state,
-        'context': context or {},
+        'volatility': volatility,
+        'open_positions': int(open_positions),
+        'recent_trade_activity': int(recent_trade_activity),
     }
     user_prompt = (
-        'Given the last cycle outcomes, recommend the next cycle interval in minutes.\n'
+        'Given the runtime activity metrics, recommend the next cycle interval in minutes.\n'
         + json.dumps(payload, ensure_ascii=True, default=str)
     )
     return SYSTEM_PROMPT, user_prompt

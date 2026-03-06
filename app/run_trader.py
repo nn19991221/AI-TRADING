@@ -8,11 +8,9 @@ import os
 from typing import Iterable
 
 from agents.data_agent import DataAgent, build_default_data_agent
-from agents.decision_agent.service import DecisionAgent, build_default_decision_agent
 from agents.frequency_agent.service import FrequencyAgent, build_default_frequency_agent
-from agents.market_agent.service import MarketAnalysisAgent, build_default_market_agent
-from agents.risk_agent.service import RiskAgent, build_default_risk_agent
 from agents.stock_selector.service import StockSelector
+from agents.strategy_agent.service import StrategyAgent, build_default_strategy_agent
 from agents.stock_selector.universe import TradingUniverseBuilder
 from broker.alpaca_broker import AlpacaBroker
 from config.settings import Settings, get_settings
@@ -25,14 +23,14 @@ from orchestrator.trading_cycle import (
 )
 from portfolio.portfolio_manager import PortfolioManager
 from risk.risk_manager import RiskManager
+from risk.risk_guard import RiskGuard
 
 
 @dataclass
 class TraderComponents:
     data_agent: DataAgent
-    market_agent: MarketAnalysisAgent
-    decision_agent: DecisionAgent
-    risk_agent: RiskAgent
+    strategy_agent: StrategyAgent
+    risk_guard: RiskGuard
     frequency_agent: FrequencyAgent
     stock_selector: StockSelector
     executor: DefaultTradingExecutor
@@ -43,9 +41,8 @@ def build_components(settings: Settings | None = None) -> TraderComponents:
     settings = settings or get_settings()
 
     data_agent = build_default_data_agent(settings=settings)
-    market_agent = build_default_market_agent(model=settings.llm_market_model)
-    decision_agent = build_default_decision_agent(model=settings.llm_decision_model)
-    risk_agent = build_default_risk_agent(model=settings.llm_risk_model)
+    strategy_agent = build_default_strategy_agent(model=settings.llm_strategy_model)
+    risk_guard = RiskGuard()
     frequency_agent = build_default_frequency_agent(model=settings.llm_scheduler_model)
 
     selector_top_n = int(os.getenv('SELECTOR_TOP_N', '5'))
@@ -71,9 +68,8 @@ def build_components(settings: Settings | None = None) -> TraderComponents:
 
     return TraderComponents(
         data_agent=data_agent,
-        market_agent=market_agent,
-        decision_agent=decision_agent,
-        risk_agent=risk_agent,
+        strategy_agent=strategy_agent,
+        risk_guard=risk_guard,
         frequency_agent=frequency_agent,
         stock_selector=stock_selector,
         executor=executor,
@@ -99,9 +95,8 @@ def run_trader(
     return run_cycle(
         symbols,
         data_agent=components.data_agent,
-        market_agent=components.market_agent,
-        decision_agent=components.decision_agent,
-        risk_agent=components.risk_agent,
+        strategy_agent=components.strategy_agent,
+        risk_guard=components.risk_guard,
         frequency_agent=components.frequency_agent,
         executor=components.executor,
         portfolio_updater=components.portfolio_updater,

@@ -1,0 +1,26 @@
+{
+  "AAPL": {
+    "volatility": "low",
+    "reuse_remaining": 0,
+    "decision": {
+      "symbol": "AAPL",
+      "market_state": "sideways",
+      "action": "BUY",
+      "confidence": 0.8,
+      "position_size": 0.2,
+      "reason": "test decision"
+    }
+  },
+  "MSFT": {
+    "volatility": "low",
+    "reuse_remaining": 0,
+    "decision": {
+      "symbol": "MSFT",
+      "market_state": "uptrend",
+      "action": "BUY",
+      "confidence": 0.9,
+      "position_size": 0.0,
+      "reason": "strategy decision"
+    }
+  }
+}
